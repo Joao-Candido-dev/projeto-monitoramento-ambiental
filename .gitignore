@@ -13,6 +13,9 @@
 *.sqlite*
 *.db
 data/
+# Geometria pública necessária ao mapa, não dados meteorológicos.
+!frontend/src/data/
+!frontend/src/data/londrina-ibge.json
 artifacts/
 models/
 !backend/src/models/
