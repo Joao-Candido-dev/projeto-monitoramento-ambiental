@@ -2,6 +2,9 @@
 from pathlib import PurePosixPath
 import subprocess
 
+SOURCE_SUFFIXES = {'.py', '.md', '.js', '.jsx', '.ts', '.tsx', '.json', '.css', '.html', '.txt', '.yml', '.yaml', '.sql'}
+SOURCE_NAMES = {'.gitignore', '.gitattributes', '.env.example', 'pre-commit'}
+
 FORBIDDEN = {'.npz', '.npy', '.nc', '.csv', '.parquet', '.zip', '.joblib', '.pkl', '.pickle', '.onnx', '.h5', '.db', '.pem', '.key', '.p12', '.pfx', '.log'}
 FOLDERS = {'data', 'artifacts', '.venv', 'venv', 'node_modules', 'dist', 'build', '__pycache__', '.aws', '.ssh'}
 # A geometria pública do mapa é código de apoio à interface, não o dataset meteorológico.
@@ -11,7 +14,8 @@ def allowed(name):
     path = PurePosixPath(name)
     base = path.name.lower()
     return name in EXCEPTIONS or not (
-        path.suffix.lower() in FORBIDDEN
+        (path.suffix.lower() not in SOURCE_SUFFIXES and base not in SOURCE_NAMES)
+        or path.suffix.lower() in FORBIDDEN
         or any(part.lower() in FOLDERS for part in path.parts)
         or (base.startswith('.env') and base != '.env.example')
         or base.startswith(('credentials', 'secrets'))
