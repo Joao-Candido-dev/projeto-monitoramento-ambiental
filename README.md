@@ -116,3 +116,8 @@ Eles descrevem o que implementar, não rotas já disponíveis. Reenvios mantêm 
 `main` guarda a base revisada. Criar `feature/nome-da-tarefa`, fazer commits pequenos e abrir pull request. Antes de juntar, executar os testes da parte alterada e revisar o diff. Não subir ambientes, segredos, dados ou modelos.
 
 Os READMEs anteriores foram preservados integralmente em [docs/originals](docs/originals/). Seus caminhos/comandos descrevem os repositórios antigos. Para este repositório, use este README e [o roteiro de continuidade](docs/continuidade.md).
+
+
+## Memória do projeto
+
+O resumo das etapas, treinamento v6 e significado do instante T está em [docs/historico/](docs/historico/README.md), junto dos relatórios de referência e de uma cópia guardada deste README. Esse material explica o caminho percorrido; os contratos de integração continuam sendo a referência de implementação.
