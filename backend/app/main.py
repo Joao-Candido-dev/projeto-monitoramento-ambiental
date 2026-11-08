@@ -1,24 +1,102 @@
-"""Servidor inicial. /health verifica o processo, não a integração futura."""
-from flask import Flask, jsonify
+import base64
+import json
+from datetime import datetime
+from uuid import UUID
+from flask import Flask, jsonify, request
+from .errors import ServiceError
+from .model_service import ModelLoadError, load_model
+from .settings import Settings
+from .weather_repository import WeatherRepository, RepositoryUnavailable, DuplicateRequest
+from .weather_service import get_weather_inputs
+from .prediction_service import predict
 from src.models.weather_ensemble import MODEL_VERSION
 
-
-def create_app():
-    app = Flask(__name__)
-
+def encode_cursor(row):
+    raw=json.dumps([row['created_at'],row['prediction_id']],separators=(',',':')).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip('=')
+def decode_cursor(value):
+    try:
+        stamp,identifier=json.loads(base64.urlsafe_b64decode(value+'='*(-len(value)%4)))
+        if datetime.fromisoformat(stamp.replace('Z','+00:00')).tzinfo is None: raise ValueError
+        UUID(identifier)
+        return stamp,identifier
+    except Exception: raise ServiceError(422,'INVALID_CURSOR','Cursor de paginação inválido.','cursor') from None
+def public_prediction(row):
+    fields=('prediction_id','request_id','created_at','location','mode','is_mock','model_version','reference_time','previous_reference_time','forecast_start','forecast_end','temperature_2m','relative_humidity_2m','pressure_msl','cloud_cover','pressure_msl_previous_hour','rain_probability','rain_predicted','decision_threshold','input_source')
+    return {field:row.get(field) for field in fields}
+def create_app(settings=None,repository=None,model=None):
+    settings=settings or Settings.from_env(); app=Flask(__name__); app.config['MAX_CONTENT_LENGTH']=16*1024
+    model_error=False
+    if model is None and settings.model_path and settings.manifest_path:
+        try:model=load_model(settings.model_path,settings.manifest_path)
+        except ModelLoadError:model_error=True
+    if repository is None and settings.supabase_url and settings.supabase_key:
+        repository=WeatherRepository(settings.supabase_url,settings.supabase_key)
+    app.extensions.update(weather_model=model,weather_repository=repository)
+    @app.after_request
+    def cors(response):
+        origin=request.headers.get('Origin')
+        if origin and origin==settings.frontend_origin:
+            response.headers['Access-Control-Allow-Origin']=origin;response.headers['Vary']='Origin'
+            response.headers['Access-Control-Allow-Headers']='Content-Type, Idempotency-Key'
+            response.headers['Access-Control-Allow-Methods']='GET, POST, OPTIONS'
+        return response
+    @app.route('/',defaults={'path':''},methods=['OPTIONS'])
+    @app.route('/<path:path>',methods=['OPTIONS'])
+    def preflight(path):return '',204
+    def database():
+        if repository is None:raise ServiceError(503,'DATABASE_UNAVAILABLE','O banco não está configurado.')
+        return repository
     @app.get('/health')
-    def health():
-        # Não carregamos o modelo nem declaramos o banco conectado nesta etapa.
-        return jsonify(status='ok', service='backend-londrina',
-                       integration_ready=False, model_version=MODEL_VERSION,
-                       model_loaded=False, database_connected=False)
-
+    def health():return jsonify(status='ok',service='backend-londrina',model_loaded=bool(model),model_error=model_error,database_configured=bool(repository),integration_ready=bool(model and repository),model_version=model.model_version if model else MODEL_VERSION)
+    @app.get('/weather-inputs')
+    def weather_inputs():
+        result=get_weather_inputs(database(),request.args.get('reference_time'));result.pop('source_record_id',None);result.pop('previous_source_record_id',None);return jsonify(result)
+    @app.post('/internal/predict')
+    def internal_predict():return jsonify(predict(model,get_weather_inputs(database(),request.args.get('reference_time'))))
+    @app.post('/predict')
+    def create_prediction():
+        repo=database()
+        try:request_id=str(UUID(request.headers.get('Idempotency-Key','')))
+        except (ValueError,AttributeError):raise ServiceError(422,'INVALID_IDEMPOTENCY_KEY','Envie um UUID válido no cabeçalho Idempotency-Key.','Idempotency-Key') from None
+        body=request.get_json(silent=True)
+        if not isinstance(body,dict) or set(body)!={'mode','reference_time'} or body.get('mode')!='historical':raise ServiceError(422,'INVALID_REQUEST','O corpo deve conter mode=historical e reference_time.')
+        if not isinstance(body['reference_time'],str):raise ServiceError(422,'INVALID_REFERENCE_TIME','Informe reference_time válido.','reference_time')
+        try:existing=repo.prediction_by_request_id(request_id)
+        except RepositoryUnavailable:raise ServiceError(503,'DATABASE_UNAVAILABLE','Não foi possível consultar o pedido anterior.') from None
+        if existing:
+            row=existing[0]
+            if row.get('reference_time')!=body['reference_time'] or row.get('mode')!='historical':raise ServiceError(409,'IDEMPOTENCY_CONFLICT','A chave já foi usada com outros dados.')
+            return jsonify(public_prediction(row)),200
+        result=predict(model,get_weather_inputs(repo,body['reference_time']))
+        payload={'request_id':request_id,'location':result['location'],'reference_time':result['reference_time'],'previous_reference_time':result['previous_reference_time'],'forecast_start':result['forecast_start'],'forecast_end':result['forecast_end'],**result['weather'],'rain_probability':result['rain_probability'],'rain_predicted':result['rain_predicted'],'decision_threshold':result['decision_threshold'],'model_version':result['model_version'],'mode':'historical','is_mock':False,'input_source':'dataset','source_record_id':result.get('source_record_id'),'previous_source_record_id':result.get('previous_source_record_id')}
+        try:saved=repo.insert_prediction(payload)
+        except DuplicateRequest:
+            try:rows=repo.prediction_by_request_id(request_id)
+            except RepositoryUnavailable:raise ServiceError(503,'DATABASE_UNAVAILABLE','Não foi possível recuperar o resultado já gravado.') from None
+            if not rows:raise ServiceError(503,'PREDICTION_WRITE_FAILED','Não foi possível confirmar a gravação concorrente.')
+            saved=rows[0]
+            if saved.get('reference_time')!=result['reference_time'] or saved.get('mode')!='historical':raise ServiceError(409,'IDEMPOTENCY_CONFLICT','A chave já foi usada com outros dados.')
+            return jsonify(public_prediction(saved)),200
+        except RepositoryUnavailable:raise ServiceError(503,'PREDICTION_WRITE_FAILED','Não foi possível salvar a previsão.') from None
+        return jsonify(public_prediction(saved)),201
+    @app.get('/predictions')
+    def predictions():
+        repo=database();start=request.args.get('created_from');end=request.args.get('created_to')
+        try:
+            for value in (start,end):
+                if not value or datetime.fromisoformat(value.replace('Z','+00:00')).tzinfo is None:raise ValueError
+            limit=int(request.args.get('limit','20'))
+            if not 1<=limit<=100:raise ValueError
+            cursor=decode_cursor(request.args['cursor']) if request.args.get('cursor') else None
+        except (ValueError,TypeError):raise ServiceError(422,'INVALID_HISTORY_FILTER','Use timestamps com fuso e limit entre 1 e 100.') from None
+        try:rows=repo.history(start,end,limit,cursor)
+        except RepositoryUnavailable:raise ServiceError(503,'HISTORY_UNAVAILABLE','Não foi possível consultar o histórico.') from None
+        more=len(rows)>limit;items=rows[:limit]
+        return jsonify(items=[public_prediction(row) for row in items],next_cursor=encode_cursor(items[-1]) if more and items else None)
+    @app.errorhandler(ServiceError)
+    def handle_service_error(error):body,status=error.response();return jsonify(body),status
     @app.errorhandler(404)
-    def not_found(_error):
-        return jsonify(error={'code': 'NOT_FOUND',
-                              'message': 'Rota inexistente. Nesta etapa somente /health está implementada.'}), 404
-
+    def not_found(_):return jsonify(error={'code':'NOT_FOUND','message':'Rota inexistente.'}),404
     return app
-
-
-app = create_app()
+app=create_app()
