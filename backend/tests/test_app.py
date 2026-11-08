@@ -1,5 +1,6 @@
 import unittest
 from app.main import create_app
+from app.settings import Settings
 
 class EmptyRepository:
     def rows_at(self, timestamp):
@@ -7,7 +8,7 @@ class EmptyRepository:
 
 class AppTests(unittest.TestCase):
     def setUp(self):
-        self.client = create_app(repository=EmptyRepository()).test_client()
+        self.client = create_app(settings=Settings(), repository=EmptyRepository()).test_client()
 
     def test_health_reports_component_states(self):
         response = self.client.get('/health')

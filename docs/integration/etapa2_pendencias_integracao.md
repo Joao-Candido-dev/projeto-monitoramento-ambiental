@@ -60,11 +60,31 @@ O formulário atual do Frontend ainda usa o contrato antigo e precisa ser adapta
 5. Atualizar a página e confirmar que a previsão aparece no histórico paginado.
 6. Testar falta de dados, indisponibilidade, conflito de chave e erro de gravação; nenhuma falha deve aparecer como “sem chuva”.
 
-## Diferenças e responsabilidades
+## Resultado consolidado da Etapa 2 — 08/11/2026
 
-- `request_id NOT NULL` e política RLS são mudanças de responsabilidade do Banco; o Backend apenas preparou SQL revisável.
-- O SQL recebido dá SELECT público ao papel `anon`; a migração remove esse acesso, pois o histórico deve passar pela API.
-- O esquema atual não persiste estado de processamento. A restrição única previne duplicação, mas não permite informar `REQUEST_IN_PROGRESS`; evolução futura do esquema depende do Banco.
-- A chave privilegiada enviada anteriormente deve ser mantida apenas como segredo local do servidor; não está armazenada no repositório.
-- Não alteramos código, tabela ou credenciais do Frontend/Banco. O Backend foi adiantado sem aguardar a entrega visual do Frontend.
-- Não houve push nesta etapa até a conclusão dos testes descritos.
+### Implementado
+
+- `POST /predict`: valida `Idempotency-Key` UUID e corpo histórico, consulta T/T−1h, executa o pacote v6 e grava uma linha em `resultados_previsoes_ia`; responde 201 após a gravação.
+- Reenvio com a mesma chave e mesmos dados recupera a previsão existente e responde 200. Chave com outro horário/modo retorna 409 `IDEMPOTENCY_CONFLICT`.
+- `GET /predictions`: intervalo temporal, limite de 1 a 100, ordenação decrescente e cursor para paginação.
+- CORS limitado à origem `FRONTEND_ORIGIN`; leitura de configurações locais pelo `.env` do Backend.
+- Migração versionada em `backend/sql/20261108_secure_prediction_access.sql` para `request_id NOT NULL` e retirada do SELECT público. Aplicação foi confirmada pela equipe do Banco; não foi executada pelo Backend.
+- Guia de execução nesta documentação. Credenciais e modelo permanecem fora do Git.
+
+### Verificações executadas
+
+- 15 testes locais do Backend aprovados.
+- `/health`, carregamento do modelo e `/weather-inputs`: HTTP 200.
+- Preflight CORS da origem local: HTTP 200.
+- Previsão real: HTTP 201 e linha persistida. `prediction_id`: `c1b87cbf-6699-44f6-93f1-30e6d38d69c9`; `request_id`: `16f6a007-225f-4ab7-ac38-0ffe81690fd1`.
+- Reenvio da mesma chave: HTTP 200, mesmo `prediction_id`. A comparação foi corrigida para considerar o instante, pois o banco normaliza o timestamp em UTC.
+- Mesma chave com outro horário: HTTP 409 `IDEMPOTENCY_CONFLICT`.
+- Histórico: HTTP 200 com o registro persistido.
+
+### Limites e próximos passos
+
+- O teste de concorrência durante o cálculo, falha de escrita e paginação com múltiplas páginas ainda não foi realizado.
+- O esquema não guarda estado `processing`; colisões são evitadas pela unicidade e o pedido repetido recupera a linha depois da primeira gravação. Não é possível retornar `REQUEST_IN_PROGRESS` durante o cálculo.
+- A equipe Frontend ainda precisa adaptar a tela para os contratos e testar no navegador com o backend.
+- A previsão persistida acima é um registro de teste histórico e permanece no Supabase.
+- O Backend não alterou dados/tabelas diretamente; a migração foi aplicada pela equipe responsável.

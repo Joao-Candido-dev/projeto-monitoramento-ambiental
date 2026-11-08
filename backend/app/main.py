@@ -21,6 +21,11 @@ def decode_cursor(value):
         UUID(identifier)
         return stamp,identifier
     except Exception: raise ServiceError(422,'INVALID_CURSOR','Cursor de paginação inválido.','cursor') from None
+def same_instant(left,right):
+    try:
+        a=datetime.fromisoformat(left.replace('Z','+00:00'));b=datetime.fromisoformat(right.replace('Z','+00:00'))
+        return a.tzinfo is not None and b.tzinfo is not None and a == b
+    except (AttributeError,ValueError): return False
 def public_prediction(row):
     fields=('prediction_id','request_id','created_at','location','mode','is_mock','model_version','reference_time','previous_reference_time','forecast_start','forecast_end','temperature_2m','relative_humidity_2m','pressure_msl','cloud_cover','pressure_msl_previous_hour','rain_probability','rain_predicted','decision_threshold','input_source')
     return {field:row.get(field) for field in fields}
@@ -66,7 +71,7 @@ def create_app(settings=None,repository=None,model=None):
         except RepositoryUnavailable:raise ServiceError(503,'DATABASE_UNAVAILABLE','Não foi possível consultar o pedido anterior.') from None
         if existing:
             row=existing[0]
-            if row.get('reference_time')!=body['reference_time'] or row.get('mode')!='historical':raise ServiceError(409,'IDEMPOTENCY_CONFLICT','A chave já foi usada com outros dados.')
+            if not same_instant(row.get('reference_time',''),body['reference_time']) or row.get('mode')!='historical':raise ServiceError(409,'IDEMPOTENCY_CONFLICT','A chave já foi usada com outros dados.')
             return jsonify(public_prediction(row)),200
         result=predict(model,get_weather_inputs(repo,body['reference_time']))
         payload={'request_id':request_id,'location':result['location'],'reference_time':result['reference_time'],'previous_reference_time':result['previous_reference_time'],'forecast_start':result['forecast_start'],'forecast_end':result['forecast_end'],**result['weather'],'rain_probability':result['rain_probability'],'rain_predicted':result['rain_predicted'],'decision_threshold':result['decision_threshold'],'model_version':result['model_version'],'mode':'historical','is_mock':False,'input_source':'dataset','source_record_id':result.get('source_record_id'),'previous_source_record_id':result.get('previous_source_record_id')}
@@ -76,7 +81,7 @@ def create_app(settings=None,repository=None,model=None):
             except RepositoryUnavailable:raise ServiceError(503,'DATABASE_UNAVAILABLE','Não foi possível recuperar o resultado já gravado.') from None
             if not rows:raise ServiceError(503,'PREDICTION_WRITE_FAILED','Não foi possível confirmar a gravação concorrente.')
             saved=rows[0]
-            if saved.get('reference_time')!=result['reference_time'] or saved.get('mode')!='historical':raise ServiceError(409,'IDEMPOTENCY_CONFLICT','A chave já foi usada com outros dados.')
+            if not same_instant(saved.get('reference_time',''),result['reference_time']) or saved.get('mode')!='historical':raise ServiceError(409,'IDEMPOTENCY_CONFLICT','A chave já foi usada com outros dados.')
             return jsonify(public_prediction(saved)),200
         except RepositoryUnavailable:raise ServiceError(503,'PREDICTION_WRITE_FAILED','Não foi possível salvar a previsão.') from None
         return jsonify(public_prediction(saved)),201
