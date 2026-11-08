@@ -1,8 +1,8 @@
 # Demandas ao Frontend — busca histórica e previsão de chuva
 
 **Projeto:** Chuva Londrina
-**Data:** 07/11/2026
-**Status:** requisitos revisados para implementação com v6. As rotas abaixo ainda precisam ser implementadas pelo Backend.
+**Data:** 08/11/2026
+**Status:** contrato de referência do Frontend; Backend Etapas 1 e 2 implementadas e testadas no fluxo principal. A integração no navegador ainda depende da adaptação do Frontend.
 
 ## Referência desta revisão — v6 definida para a integração
 
@@ -10,7 +10,7 @@
 
 O serviço carregará `weather_ensemble.joblib`, produzido por `scripts/package_weather_model.py` no repositório de pesquisa original a partir dos três Random Forests da v6. O pacote combina as probabilidades calibradas dos três modelos com pesos iguais. A versão documentada é `weather-v6-simple-mean-isotonic-v1`. O empacotador atual usa limiar 0,50; a API deve devolver o limiar e a versão do pacote carregado, e o Frontend deve exibi-los sem recalcular a classificação. A avaliação v7 complementa os estudos da v6; não é outro treinamento a ser executado pela interface.
 
-Antes de atender pedidos reais, o Backend deve obter e verificar o arquivo do modelo e seu manifesto. Esses artefatos não acompanham o clone. **O servidor carrega o modelo já treinado; não executa `train_v6.py` a cada previsão.**
+O Backend carrega e verifica o pacote v6 já treinado no início do processo; não executa `train_v6.py` a cada previsão. O pacote e as credenciais são configurações locais do servidor e não devem ser adicionados ao Git ou ao bundle do Frontend.
 
 ### Sete features não são sete campos para o usuário
 
@@ -42,7 +42,7 @@ Exemplo do cabeçalho no POST:
 Idempotency-Key: 7d55d4c2-9ec1-4a8e-8a15-9ef091a4a408
 ```
 
-O corpo histórico permanece somente com `mode` e `reference_time`. Toda resposta de sucesso, inclusive no histórico, inclui o `request_id` correspondente. Esta é uma regra definida para implementação; ela ainda não existe como serviço pronto no repositório.
+O corpo histórico permanece somente com `mode` e `reference_time`. Toda resposta de sucesso, inclusive no histórico, inclui o `request_id` correspondente. O Backend já implementa o fluxo principal; veja os exemplos atualizados no apêndice desta documentação.
 
 **Referência para este fluxo:** estes três documentos revisados usam busca automática pelo Backend e POST com T/modo. Eles substituem, para esta integração histórica, a proposta antiga de enviar medidas manualmente em `docs/integration/`. Os três contratos antigos foram removidos; estes documentos são a referência vigente da integração. O formulário manual é secundário e não define o contrato principal.
 
@@ -311,3 +311,89 @@ Antes da conexão real, fechar nomes das rotas, formato JSON, erros, URL e orige
 ## Localização nesta aplicação
 
 O adaptador fica em `backend/src/models/weather_ensemble.py`. Treinamento, empacotamento e estudos permanecem no repositório de pesquisa; não são executados pelo servidor. O README da raiz informa o que já funciona. As rotas de previsão deste contrato ainda precisam ser implementadas.
+
+
+## 10. Estado atual e execução para integração
+
+### Configurar e iniciar
+
+Na pasta `frontend`, configure `.env` com a URL local do Backend, sem barra final:
+
+```env
+VITE_API_URL=http://localhost:5000
+```
+
+Use a porta real em que o Flask estiver executando. Mantenha as configurações Supabase já usadas pela EDA no arquivo local do Frontend. **Não copie `SUPABASE_SERVICE_ROLE_KEY` para o Frontend.**
+
+Em terminais separados, na raiz do repositório:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m flask --app app.main run --host 127.0.0.1 --port 5000
+```
+
+```powershell
+cd frontend
+npm run dev -- --host 127.0.0.1
+```
+
+O Backend permite CORS somente para a origem definida em `FRONTEND_ORIGIN` (padrão `http://localhost:5173`). Se o Vite usar outra porta, ajustar essa variável no ambiente local do Backend e reiniciar o servidor. O Vite precisa ser reiniciado após mudar `VITE_API_URL`.
+
+### Exemplos conforme o Backend implementado
+
+Buscar medidas (timestamp deve estar codificado pela biblioteca HTTP):
+
+```http
+GET /weather-inputs?reference_time=2026-09-01T14%3A00%3A00-03%3A00
+```
+
+Resposta 200 inclui `location`, `mode`, `reference_time`, `previous_reference_time`, `forecast_start`, `forecast_end` e `weather` com as cinco medidas: quatro em T e `pressure_msl_previous_hour` em T−1h. T inexistente retorna 404; ausência de T−1h ou entrada inválida retorna 422; banco/modelo indisponível retorna 503.
+
+Criar previsão:
+
+```http
+POST /predict
+Content-Type: application/json
+Idempotency-Key: 7d55d4c2-9ec1-4a8e-8a15-9ef091a4a408
+
+{
+  "mode": "historical",
+  "reference_time": "2026-09-01T14:00:00-03:00"
+}
+```
+
+Primeiro salvamento retorna 201 e `prediction_id`; repetição concluída, com a mesma chave/corpo, retorna 200 e o mesmo registro. A mesma chave com outro horário ou modo retorna 409 `IDEMPOTENCY_CONFLICT`. O resultado inclui as entradas usadas, probabilidade de 0 a 1, classificação, limiar, versão, `request_id` e `prediction_id`.
+
+Histórico paginado:
+
+```http
+GET /predictions?created_from=2026-11-01T00%3A00%3A00Z&created_to=2026-11-09T00%3A00%3A00Z&limit=20
+```
+
+Use `next_cursor` da resposta como parâmetro `cursor` da próxima chamada. Intervalo é inclusivo no início e exclusivo no fim; limite aceito de 1 a 100. O Backend ordena por execução mais recente. Timestamp inválido/cursor inválido retorna 422; indisponibilidade do banco retorna 503.
+
+### Idempotência na tela
+
+- Gere um UUID novo quando o usuário inicia uma previsão intencional.
+- Preserve a mesma chave e o mesmo corpo durante envio e em caso de timeout ou resposta incerta; não faça retry automático.
+- Trate 201 e 200 como sucesso e atualize a lista sem duplicar visualmente o registro.
+- Após sucesso, uma nova previsão intencional, mesmo para o mesmo T, recebe UUID novo.
+- O banco não mantém estado `processing`: se duas solicitações iguais coincidirem antes do insert, a restrição UNIQUE evita duplicidade e o pedido concorrente recupera o resultado depois que a primeira gravação conclui. Não espere `REQUEST_IN_PROGRESS` no estado atual.
+
+### Estado já verificado
+
+Em 08/11/2026 o Backend carregou a v6, consultou entradas reais de T/T−1h (200), gravou uma previsão de teste (201), recuperou a mesma linha no reenvio (200), retornou 409 para chave reutilizada com outro horário e consultou o histórico (200). Os 15 testes locais do Backend passaram e o preflight CORS local foi aprovado. O teste real criou um registro persistente no Supabase.
+
+Ainda falta a validação conjunta no navegador com o Frontend adaptado. Falhas de escrita, corrida concorrente durante cálculo e navegação por mais de uma página ainda precisam de testes dedicados.
+
+### Checklist de integração no navegador
+
+- [ ] `VITE_API_URL` aponta para a URL/porta correta do Backend; segredos de serviço não estão no Frontend.
+- [ ] Backend responde em `/health` com modelo carregado; Vite usa a origem liberada em `FRONTEND_ORIGIN`.
+- [ ] Preflight OPTIONS permite somente a origem esperada e os cabeçalhos `Content-Type` e `Idempotency-Key`.
+- [ ] Buscar um horário conhecido apresenta quatro medidas em T e a pressão de exatamente T−1h.
+- [ ] Gerar previsão mostra a resposta do Backend e a linha correspondente existe no histórico do Supabase.
+- [ ] Reenvio da mesma chave/corpo não cria outra linha; novo pedido intencional usa chave nova.
+- [ ] Chave conflitante, falta de dados, timeout e serviço indisponível aparecem como erro, nunca como “sem chuva”.
+- [ ] Histórico pagina usando `next_cursor` e distingue `created_at` de `reference_time`.
+- [ ] Atualizar a página mantém o histórico salvo e não duplica itens na interface.
